@@ -7,11 +7,51 @@
     mount_dir: /vol/data
 
   tasks:
-    - name: install libgmp10
+    - name: apt update
       apt:  update_cache=yes upgrade=full
 
-    - name: install libgmp10
+    - name: install libgmp10 (2)
       apt: name=libgmp10
+
+    - name: install aws cloudwatch agent (1)
+      command: wget https://s3.amazonaws.com/aws-cloudwatch/downloads/latest/awslogs-agent-setup.py
+
+    - name: install aws cloudwatch agent (2)
+      copy:
+        content: "[general]
+          \nstate_file = /var/awslogs/state/agent-state
+          \n
+          \n[/var/log/syslog]
+          \nfile = /var/log/syslog
+          \nlog_group_name=/aws/ec2/syslog
+          \nlog_stream_name={instance_id}
+          \ndatetime_format = %b %d %H:%M:%S
+          \ninitial_position = start_of_file
+          \n
+          \n[/var/log/arangodb3]
+          \nfile = /var/log/arangodb3/arangod.log
+          \nlog_group_name=/aws/ec2/arangodb3
+          \nlog_stream_name={instance_id}
+          \ndatetime_format = %b %d %H:%M:%S
+          \ninitial_position = start_of_file
+          "
+        dest: /tmp/cw-agent.config
+
+    - name: install aws cloudwatch agent (3)
+      command: python awslogs-agent-setup.py -n -r us-east-1 -c /tmp/cw-agent.config
+
+    - name: install aws cloudwatch agent (4)
+      copy:
+        content: "[default]
+          \naws_access_key_id={{aws_access_key_id}}
+          \naws_secret_access_key={{aws_secret_access_key}}
+          \nregion=us-east-1
+          \n[plugins]
+          \ncwlogs = cwlogs"
+        dest: /var/awslogs/etc/aws.conf
+
+    - name: install aws cloudwatch agent (5)
+      command: service awslogs restart
 
     - name: install python-pycurl
       apt: name=python-pycurl
@@ -27,13 +67,13 @@
 
     - name: add arangodb key
       apt_key:
-        url=https://www.arangodb.com/repositories/{{arangodb_repo}}/xUbuntu_16.04/Release.key
+        url=https://download.arangodb.com/{{arangodb_repo}}/DEBIAN/Release.key
         state=present
         validate_certs=no
 
     - name: add arangodb repo
       apt_repository:
-        repo='deb https://www.arangodb.com/repositories/{{arangodb_repo}}/xUbuntu_16.04 /'
+        repo='deb https://download.arangodb.com/{{arangodb_repo}}/DEBIAN /'
         state=present
 
     - name: install arangodb
@@ -48,27 +88,21 @@
     - name: ensure arangodb is running
       service: name={{arangodb_name}} state=stopped
 
-    - name: delete arangodb temporay standalone folder
-      file: path=/var/lib/{{arangodb_name}} state=absent
+    - name: patch startup script to use arangodb user
+      lineinfile:
+        dest=/lib/systemd/system/{{arangodb_name}}.service
+        insertafter="^Type=simple"
+        regexp="^Type=simple"
+        line="Type=Simple\nUser=arangodb\nPermissionsStartOnly=true\n"
+        state=present
 
     - name: patch startup script to use default password
       lineinfile:
-        dest=/etc/init.d/{{arangodb_name}}
-        insertafter="^PIDFILE="
-        regexp="^export ARANGODB_DEFAULT_ROOT_PASSWORD="
-        line="export ARANGODB_DEFAULT_ROOT_PASSWORD=$(ec2metadata --instance-id)"
+        dest=/lib/systemd/system/{{arangodb_name}}.service
+        insertafter="^ExecStartPre=/usr/bin/env chmod 700 /var/lib/arangodb3-apps"
+        regexp="^ExecStartPre=/usr/bin/env chmod 700 /var/lib/arangodb3-apps"
+        line="ExecStartPre=/usr/bin/env chmod 700 /var/lib/arangodb3-apps\nExecStartPre=/bin/bash -c \"/bin/systemctl set-environment ARANGODB_DEFAULT_ROOT_PASSWORD=$( ec2metadata --instance-id )\"\n"
         state=present
-
-    - name: patch datadir in startup script
-      lineinfile:
-        dest=/etc/init.d/{{arangodb_name}}
-        regexp=" cd /var/lib/{{arangodb_name}} "
-        line="    ( cd {{mount_dir}}/standalone && chown -R arangodb:arangodb . ) || exit 1"
-        state=present
-
-    # cannot use replace (avaiable from 1.6 onwards only)
-    - name: patch startup script
-      shell: sed -e 's:-c \$CONF::' < /etc/init.d/{{arangodb_name}} > /etc/init.d/{{arangodb_name}}.new && mv /etc/init.d/{{arangodb_name}}.new /etc/init.d/{{arangodb_name}} && chmod 755 /etc/init.d/{{arangodb_name}}
 
     - name: create arangodb final standalone folder
       file: path={{mount_dir}}/standalone state=directory owner=arangodb group=arangodb
